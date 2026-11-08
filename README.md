@@ -1,6 +1,6 @@
 # Aurum
 
-Dashboard financeiro pessoal, **local-first**, com visual preto e dourado, tipografia editorial e interface em português (pt-BR). Os dados ficam em um cofre SQLite dentro do navegador e são sincronizados entre dispositivos apenas como payloads cifrados.
+Dashboard financeiro pessoal, **local-first** e **100% estático**. Roda direto no navegador — inclusive no **GitHub Pages** — sem servidor, sem banco remoto e sem conta em nuvem. Os dados ficam em um cofre SQLite cifrado no `IndexedDB` do navegador e só saem de lá por backup manual.
 
 ## Recursos
 
@@ -11,9 +11,8 @@ Dashboard financeiro pessoal, **local-first**, com visual preto e dourado, tipog
 - **Metas** de economia com aportes e progresso.
 - **Recorrentes** (contas e assinaturas) com registro de pagamento no mês.
 - **Salário** totalmente manual: valor bruto, cada desconto (INSS, crediário etc.) e líquido resultante.
-- **Sincronização cifrada** entre navegadores/dispositivos.
-- **Acesso offline** ao cofre já baixado, usando o PIN.
-- **Backup** em JSON pela tela de Configurações.
+- **Cofre cifrado** com PIN, aberto offline e sem nenhuma chamada de rede.
+- **Backup e restauração** em JSON pela tela de Configurações.
 
 ## Stack
 
@@ -21,14 +20,14 @@ Dashboard financeiro pessoal, **local-first**, com visual preto e dourado, tipog
 | --- | --- |
 | Interface | React 19, TypeScript, Vite 8, Recharts, lucide-react |
 | Estilo | CSS próprio, Cormorant Garamond + Inter (`@fontsource`) |
-| Banco local | SQLite no navegador com `sql.js`, persistido cifrado em IndexedDB |
+| Banco local | SQLite no navegador com `sql.js`, persistido cifrado em `IndexedDB` |
 | Criptografia | AES-256-GCM; chave derivada do PIN via PBKDF2-SHA-256 (210.000 iterações) |
-| Servidor | Fastify 5, `node:sqlite`, sessão em cookie `HttpOnly` |
-| Autenticação | Nome do cofre + PIN; hash do PIN com `scrypt` no servidor |
+| Roteamento | React Router com `HashRouter` (funciona em subpastas do Pages) |
+| Deploy | Site estático no GitHub Pages via GitHub Actions |
 
 ## Requisitos
 
-- Node.js **24 LTS** (recomendado) — o servidor usa `node:sqlite`.
+- Node.js **22.12+** (Vite 8). Recomendado: **Node 24 LTS**.
 - npm 11+.
 
 ## Rodar localmente
@@ -38,96 +37,56 @@ npm install
 npm run dev
 ```
 
-- Interface: <http://localhost:5173>
-- API: <http://localhost:8787> (o Vite faz proxy de `/api` para essa porta)
+Interface em <http://localhost:5173>. Crie um cofre na primeira tela — o nome e o PIN são a única credencial.
 
-Crie um cofre na primeira tela. O nome e o PIN são a única credencial; não há recuperação de PIN.
+> Abra sempre por `http://localhost` (ou HTTPS). O app usa módulos ES, WebAssembly e `IndexedDB`; abrir `dist/index.html` com `file://` não funciona.
 
-### Produção
-
-```bash
-npm run build
-npm start
-```
-
-O servidor serve a build do cliente em `client/dist` e a API na mesma porta (`8787` por padrão). Acesse <http://localhost:8787>.
-
-## Variáveis de ambiente
-
-Definidas no processo do **servidor**:
-
-| Variável | Padrão | Descrição |
-| --- | --- | --- |
-| `PORT` | `8787` | Porta HTTP. |
-| `HOST` | `0.0.0.0` | Interface de rede. |
-| `DATA_DIR` | `./data` | Pasta do SQLite do servidor. Use um volume persistente em produção. |
-| `COOKIE_SECURE` | `false` | Defina `true` atrás de HTTPS. O cookie também vira `Secure` automaticamente quando a requisição chega por HTTPS. |
-| `TRUST_PROXY` | `false` | Defina `true` atrás de um proxy reverso confiável (para IP real e protocolo). |
-| `LOG_LEVEL` | `info` | Nível de log do Fastify. |
-
-Exemplo:
+## Build
 
 ```bash
-# Linux/macOS
-DATA_DIR=/var/lib/aurum PORT=8787 COOKIE_SECURE=true TRUST_PROXY=true npm start
+npm run build -w client
+npm run preview -w client
 ```
 
-```powershell
-# PowerShell
-$env:DATA_DIR="D:\aurum-data"; $env:PORT=8787; $env:COOKIE_SECURE="true"; $env:TRUST_PROXY="true"; npm start
-```
+A saída fica em `client/dist` e usa caminhos relativos (`./assets/...`), então funciona em qualquer subpasta.
 
 ## Como os dados funcionam
 
-1. Ao criar o cofre, o cliente gera um `vaultSalt` e deriva uma chave AES-256 do PIN com PBKDF2.
-2. O banco SQLite (`sql.js`) é cifrado com AES-256-GCM e salvo no **IndexedDB** do navegador.
-3. A cada alteração, as linhas modificadas são cifradas individualmente e enviadas para `POST /api/sync/push`.
-4. Outros navegadores baixam os registros por `GET /api/sync/pull` usando um cursor por usuário.
-5. Conflitos são resolvidos por **last-write-wins** com base em `updated_at` (milissegundos). O servidor rejeita versões mais antigas; o cliente ignora registros remotos que não sejam mais novos que os locais.
-6. O servidor vê apenas entidade, ID do registro, timestamp e payload cifrado. Nomes, valores e categorias não trafegam em texto puro.
+1. Ao criar o cofre, o cliente gera um **salt aleatório** e deriva uma chave AES-256 do PIN com PBKDF2.
+2. Um verificador cifrado é gravado junto da conta local, para validar o PIN sem nunca armazená-lo.
+3. O banco SQLite (`sql.js`) é cifrado com AES-256-GCM e salvo no **IndexedDB** do navegador.
+4. Cada alteração é salva no mesmo lugar, de forma cifrada e automática.
+5. **Nada trafega pela rede.** Não existe servidor, sessão, cookie ou sincronização automática.
 
-O primeiro acesso em um navegador novo baixa o cofre do servidor. Depois disso, o navegador consegue abrir offline com o PIN. Se o cofre local e o servidor estiverem vazios, são criadas categorias padrão e uma conta principal.
+## Backup, importação e troca de aparelho
 
-### Sincronização e sessão
-
-- A sincronização roda ao abrir o app, após alterações e a cada 2 minutos com a aba visível.
-- A sessão do servidor dura **30 dias**.
-- Tentativas de login/registro são limitadas a **12 falhas por 15 minutos** por IP + nome.
-- **Configurações → Sincronizar agora** força uma rodada; **Reenviar cofre inteiro** marca todos os registros locais como alterados.
-
-## Backup e restauração
-
-- **Backup dos dados**: Configurações → exportar JSON. O arquivo é legível e contém contas, categorias, transações, orçamentos, metas, recorrentes, salário e descontos.
-- **Backup do servidor**: copie a pasta definida em `DATA_DIR` (idealmente com o processo parado, ou usando backup consistente do SQLite).
-- **Cofre local**: fica no IndexedDB do navegador, cifrado. Limpar os dados do site apaga essa cópia; o servidor mantém a versão sincronizada.
-
-> Não há restauração automática de um JSON exportado pela interface. Guarde-o como registro/portabilidade; para migrar de navegador, use a sincronização cifrada entrando com o mesmo nome e PIN.
+- **Exportar**: Configurações → *Baixar backup* gera um JSON legível com contas, categorias, transações, orçamentos, metas, recorrentes, salário e descontos.
+- **Importar**: Configurações → *Importar backup* mescla um JSON exportado no cofre aberto (os registros são combinados por `id`).
+- **Trocar de aparelho**: exporte em um navegador e importe no outro depois de criar o cofre local.
+- **Limpar os dados do site** apaga a cópia local. Sem backup exportado, não há como recuperar.
+- O arquivo JSON é legível e contém valores financeiros — guarde-o em local seguro.
 
 ## Segurança e limitações
 
-- **O PIN não pode ser recuperado.** Sem o PIN correto, nem o servidor consegue decifrar o cofre. Perder o PIN significa perder o acesso aos dados sincronizados.
-- Use HTTPS em produção. Sem TLS, o PIN e o cookie de sessão podem ser interceptados na rede.
-- O PIN é enviado ao servidor para autenticação (hash com `scrypt`), mas a chave do cofre é derivada apenas no cliente e nunca é enviada.
-- O servidor conhece metadados de sincronização (entidade, ID, horário) e o nome do cofre; os valores financeiros são cifrados no cliente.
-- Um PIN de 4 a 6 dígitos tem espaço de busca pequeno. Para dados sensíveis, prefira 6 dígitos e mantenha o servidor privado/atrás de HTTPS.
-- O app não implementa multiusuário compartilhando o mesmo cofre: cada usuário tem seu próprio cofre e suas próprias sessões.
+- **O PIN não pode ser recuperado.** Ele nunca é armazenado; só a chave derivada dele abre o cofre.
+- Sem HTTPS, alguém com acesso à máquina pode ler o `IndexedDB`. O GitHub Pages já serve por HTTPS.
+- Um PIN de 4 a 6 dígitos tem espaço de busca pequeno: prefira **6 dígitos**.
+- Não há sincronização entre dispositivos — use o backup JSON.
 - Não há cálculo automático de INSS/IRRF. O salário é registrado exatamente como informado.
 
 ## Estrutura do projeto
 
 ```
 Dashboard Financeiro/
-├── client/                 # React + Vite
+├── client/                 # React + Vite (o app publicado)
 │   └── src/
 │       ├── components/     # layout, modais, primitivas, gráficos
-│       ├── lib/            # SQLite, cripto, IndexedDB, API, sync, repositórios
+│       ├── lib/            # SQLite, cripto, IndexedDB, contas locais, repositórios
 │       ├── pages/          # painel, transações, contas, orçamentos, metas...
-│       ├── state/          # AppContext (cofre, sessão, sincronização)
+│       ├── state/          # AppContext (cofre, sessão local, salvamento)
 │       └── styles.css      # design system preto e dourado
-├── server/                 # Fastify + node:sqlite
-│   └── src/
-│       ├── index.ts        # rotas, autenticação, estáticos
-│       └── db.ts           # usuários, sessões, sync_records
+├── server/                 # Servidor opcional (legado, fora do fluxo do app)
+├── .github/workflows/      # deploy automático no GitHub Pages
 └── package.json            # workspaces e scripts
 ```
 
@@ -135,19 +94,37 @@ Dashboard Financeiro/
 
 | Comando | Ação |
 | --- | --- |
-| `npm run dev` | Sobe API e Vite em paralelo. |
-| `npm run dev:server` | Apenas a API com `tsx watch`. |
-| `npm run dev:client` | Apenas o Vite. |
-| `npm run build` | Typecheck + build do cliente e do servidor. |
-| `npm start` | Inicia o servidor de produção (serve `client/dist`). |
+| `npm run dev` | Sobe só o cliente (Vite) em `localhost:5173`. |
+| `npm run dev:client` | O mesmo, explícito. |
+| `npm run dev:all` | Cliente + servidor legado em paralelo. |
+| `npm run dev:server` | Apenas o servidor legado (`tsx watch`). |
+| `npm run build` | Build do cliente e do servidor. |
+| `npm run build -w client` | Apenas o build publicado no Pages. |
 | `npm run typecheck` | Checagem de tipos dos dois workspaces. |
 
-## Deploy
+## Publicar no GitHub Pages
 
-1. `npm ci && npm run build` no servidor.
-2. Aponte `DATA_DIR` para um volume persistente.
-3. Rode `npm start` atrás de um proxy com TLS (Nginx, Caddy, etc.).
-4. Use `COOKIE_SECURE=true` e `TRUST_PROXY=true`.
-5. Faça backup periódico de `DATA_DIR`.
+O workflow `.github/workflows/deploy.yml` já faz tudo: instala dependências, roda o typecheck/build do cliente e publica `client/dist`.
 
-Como não há dependência de banco externo, um único processo Node com um volume é suficiente para uso pessoal.
+1. Suba o repositório no GitHub (branch `main`).
+2. Em **Settings → Pages**, defina **Source: GitHub Actions**.
+3. Rode o workflow (push na `main` ou *Actions → Deploy no GitHub Pages → Run workflow*).
+4. O site fica em `https://<usuario>.github.io/<repositorio>/`.
+
+Observações:
+
+- Em contas gratuitas, o Pages só publica repositórios **públicos**. Repositórios privados exigem plano pago.
+- Como o app usa `HashRouter` + caminhos relativos, funciona em qualquer nome de repositório e não precisa de `404.html`.
+- Depois de um deploy, use `Ctrl+F5` se o navegador insistir em carregar o bundle antigo.
+
+## Servidor opcional (legado)
+
+O projeto nasceu com sincronização entre dispositivos: API Fastify + `node:sqlite` + registros cifrados (`server/`, e no cliente `lib/api.ts` e `lib/sync.ts`). Esse caminho **não é usado pela interface atual** — ele fica no repositório apenas como referência e pode ser reativado se você quiser voltar a ter múltiplos dispositivos com sincronização.
+
+```bash
+npm run dev:all        # cliente + API
+npm run build          # inclui o servidor
+npm start              # serve client/dist + /api em http://localhost:8787
+```
+
+Variáveis do servidor: `PORT` (8787), `HOST` (0.0.0.0), `DATA_DIR` (`./data`), `COOKIE_SECURE`, `TRUST_PROXY`, `LOG_LEVEL`.

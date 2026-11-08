@@ -7,7 +7,6 @@ import {
   LogOut,
   Menu,
   PieChart,
-  RefreshCw,
   Repeat,
   Settings,
   Target,
@@ -50,15 +49,15 @@ const GROUPS: Array<{ label: string; items: NavItem[] }> = [
 ];
 
 const STATUS_LABEL: Record<string, string> = {
-  idle: 'Sincronizado',
-  syncing: 'Sincronizando',
+  idle: 'Salvo neste navegador',
+  syncing: 'Salvando',
   offline: 'Offline',
-  error: 'Falha ao sincronizar',
+  error: 'Falha ao salvar',
   auth: 'Sessão expirada',
 };
 
 export function AppLayout() {
-  const { user, sync, online, logout, syncNow } = useApp();
+  const { user, savedAt, online, logout } = useApp();
   const [menuOpen, setMenuOpen] = useState(false);
   const location = useLocation();
 
@@ -72,12 +71,9 @@ export function AppLayout() {
   }, [menuOpen]);
 
   const initials = (user?.username ?? 'A').slice(0, 1).toUpperCase();
-  const syncDetail =
-    sync.status === 'idle'
-      ? sync.lastSyncAt
-        ? `Sincronizado ${relativeTime(sync.lastSyncAt)}`
-        : 'Pronto para sincronizar'
-      : sync.message ?? STATUS_LABEL[sync.status];
+  const savedDetail = savedAt
+    ? `Salvo ${relativeTime(savedAt)}`
+    : STATUS_LABEL.idle;
 
   return (
     <div className="shell">
@@ -139,9 +135,9 @@ export function AppLayout() {
             <span className="user-box__avatar">{initials}</span>
             <div className="user-box__info">
               <span className="user-box__name">{user?.username}</span>
-              <span className={`sync-text sync-text--${sync.status}`}>
-                <span className={`sync-dot sync-dot--${sync.status}`} />
-                {syncDetail}
+              <span className="sync-text sync-text--idle">
+                <span className="sync-dot sync-dot--idle" />
+                {savedDetail}
               </span>
             </div>
             <IconButton label="Sair" icon={<LogOut size={16} />} onClick={() => void logout()} />
@@ -154,24 +150,6 @@ export function AppLayout() {
           <div className="ribbon ribbon--muted">
             <WifiOff size={15} />
             <span>Você está offline. Suas alterações ficam salvas neste navegador.</span>
-          </div>
-        ) : null}
-
-        {online && sync.status === 'auth' ? (
-          <div className="ribbon ribbon--alert">
-            <span>Sua sessão expirou. Entre novamente para voltar a sincronizar.</span>
-            <button type="button" onClick={() => void logout()}>
-              Entrar novamente
-            </button>
-          </div>
-        ) : null}
-
-        {online && sync.status === 'error' ? (
-          <div className="ribbon ribbon--alert">
-            <span>{sync.message ?? 'Não foi possível sincronizar.'}</span>
-            <button type="button" onClick={() => void syncNow()}>
-              <RefreshCw size={13} /> Tentar novamente
-            </button>
           </div>
         ) : null}
 

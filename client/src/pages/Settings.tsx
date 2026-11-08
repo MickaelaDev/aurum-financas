@@ -1,22 +1,20 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   Archive,
   ArchiveRestore,
-  Cloud,
   Database,
   Download,
+  HardDrive,
   KeyRound,
   LockKeyhole,
   LogOut,
   Pencil,
   Plus,
-  RefreshCw,
   ShieldCheck,
-  Wifi,
-  WifiOff,
+  Upload,
 } from 'lucide-react';
 import { useApp } from '../state/AppContext';
-import { formatDateTime, relativeTime } from '../lib/date';
+import { relativeTime } from '../lib/date';
 import { listCategories, setCategoryArchived } from '../lib/repo';
 import type { Category } from '../lib/types';
 import {
@@ -30,32 +28,29 @@ import {
 } from '../components/ui';
 import { CategoryModal } from '../components/CategoryModal';
 
-const SYNC_LABEL: Record<string, string> = {
-  idle: 'Tudo sincronizado',
-  syncing: 'Sincronizando agora',
-  offline: 'Sem conexão',
-  error: 'Falha na sincronização',
-  auth: 'Sessão expirada',
-};
-
 export function Settings() {
-  const {
-    db,
-    version,
-    bump,
-    user,
-    sync,
-    online,
-    logout,
-    syncNow,
-    resync,
-    downloadBackup,
-  } = useApp();
+  const { db, version, bump, user, savedAt, online, logout, downloadBackup, importBackup } =
+    useApp();
   const { toast } = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [categoryOpen, setCategoryOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
-  const [resyncOpen, setResyncOpen] = useState(false);
   const [logoutOpen, setLogoutOpen] = useState(false);
+
+  async function handleImport(file: File | undefined) {
+    if (!file) return;
+    try {
+      const count = await importBackup(file);
+      toast(`${count} ${count === 1 ? 'registro importado' : 'registros importados'}.`);
+    } catch (importError) {
+      toast(
+        importError instanceof Error ? importError.message : 'Não foi possível importar.',
+        'error',
+      );
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
 
   const categories = useMemo(() => listCategories(db, true), [db, version]);
   const income = categories.filter((category) => category.kind === 'income');
@@ -95,13 +90,11 @@ export function Settings() {
             </span>
             <div>
               <strong>{user?.username}</strong>
-              <p>
-                {online ? 'Conectado ao servidor de sincronização.' : 'Trabalhando apenas com a cópia local.'}
-              </p>
+              <p>Seus dados vivem apenas neste navegador.</p>
             </div>
           </div>
           <p className="settings-note">
-            O nome identifica seu cofre. O PIN não é armazenado em texto — ele deriva a chave
+            O nome identifica seu cofre. O PIN não é armazenado — ele deriva a chave
             que abre os dados neste navegador.
           </p>
           <div className="settings-actions">
@@ -118,65 +111,41 @@ export function Settings() {
         <section className="panel settings-card">
           <div className="panel__head">
             <div>
-              <p className="eyebrow">Sincronização</p>
-              <h2 className="panel__title">Entre navegadores</h2>
+              <p className="eyebrow">Armazenamento</p>
+              <h2 className="panel__title">Cópia local</h2>
             </div>
-            <span className={`panel__icon ${online ? '' : 'is-muted'}`.trim()}>
-              {online ? <Cloud size={17} strokeWidth={1.3} /> : <WifiOff size={17} strokeWidth={1.3} />}
+            <span className="panel__icon">
+              <HardDrive size={17} strokeWidth={1.3} />
             </span>
           </div>
           <div className="settings-status">
             <div>
-              <span className={`sync-dot sync-dot--${sync.status}`} />
-              <strong>{SYNC_LABEL[sync.status]}</strong>
+              <span className="sync-dot sync-dot--idle" />
+              <strong>{savedAt ? 'Salvo neste navegador' : 'Pronto'}</strong>
             </div>
             <span className="is-muted">
-              {sync.lastSyncAt ? `Última vez ${relativeTime(sync.lastSyncAt)}` : 'Ainda não sincronizado'}
+              {savedAt ? `Última gravação ${relativeTime(savedAt)}` : 'Nenhuma gravação ainda'}
             </span>
           </div>
           <div className="settings-rows">
             <div>
-              <span>Alterações pendentes</span>
-              <strong>{sync.pending}</strong>
+              <span>Armazenamento</span>
+              <strong>IndexedDB (cifrado)</strong>
             </div>
             <div>
               <span>Conexão</span>
               <strong className={online ? 'is-gold' : 'is-wine'}>
-                {online ? (
-                  <>
-                    <Wifi size={13} /> Online
-                  </>
-                ) : (
-                  <>
-                    <WifiOff size={13} /> Offline
-                  </>
-                )}
+                {online ? 'Online' : 'Offline'}
               </strong>
             </div>
             <div>
-              <span>Última sincronização</span>
-              <strong>{sync.lastSyncAt ? formatDateTime(sync.lastSyncAt) : '—'}</strong>
+              <span>Outros aparelhos</span>
+              <strong>Backup em JSON</strong>
             </div>
           </div>
-          <div className="settings-actions">
-            <Button
-              variant="secondary"
-              icon={<RefreshCw size={14} />}
-              onClick={() => {
-                void syncNow();
-                toast('Sincronização solicitada.', 'info');
-              }}
-              disabled={!online}
-            >
-              Sincronizar agora
-            </Button>
-            <Button variant="ghost" onClick={() => setResyncOpen(true)} disabled={!online}>
-              Reenviar cofre inteiro
-            </Button>
-          </div>
           <p className="settings-note">
-            Cada navegador mantém uma cópia local. As alterações são enviadas cifradas e
-            aplicadas nos outros navegadores pelo nome do cofre.
+            Este site é estático: não existe servidor nem sincronização automática. Para usar
+            os dados em outro navegador ou aparelho, exporte o backup em JSON e importe lá.
           </p>
         </section>
       </div>
@@ -274,9 +243,16 @@ export function Settings() {
             </span>
           </div>
           <p className="settings-note">
-            Exporte um backup completo em JSON. O arquivo é legível e contém valores
-            financeiros — guarde-o em local seguro.
+            Exporte um backup completo em JSON ou importe um arquivo exportado aqui mesmo.
+            O arquivo é legível e contém valores financeiros — guarde-o em local seguro.
           </p>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            hidden
+            onChange={(event) => void handleImport(event.target.files?.[0])}
+          />
           <div className="settings-actions">
             <Button
               variant="secondary"
@@ -287,6 +263,13 @@ export function Settings() {
               }}
             >
               Baixar backup
+            </Button>
+            <Button
+              variant="ghost"
+              icon={<Upload size={14} />}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              Importar backup
             </Button>
           </div>
         </section>
@@ -305,15 +288,14 @@ export function Settings() {
             <li>
               <ShieldCheck size={15} />
               <span>
-                Dados locais e sincronizados com <strong>AES-256-GCM</strong>, com chave
+                Dados locais cifrados com <strong>AES-256-GCM</strong>, com chave
                 derivada do PIN via PBKDF2.
               </span>
             </li>
             <li>
               <KeyRound size={15} />
               <span>
-                O servidor recebe apenas registros cifrados. Nome, identificadores e datas de
-                atualização são metadados.
+                Nada é enviado para servidores: o cofre nunca sai deste navegador.
               </span>
             </li>
             <li>
@@ -336,18 +318,6 @@ export function Settings() {
           setEditingCategory(null);
         }}
         category={editingCategory}
-      />
-
-      <ConfirmDialog
-        open={resyncOpen}
-        title="Reenviar cofre inteiro"
-        description="Todos os registros locais serão marcados como novos e enviados ao servidor. Use isso se algo parecer fora de sincronia."
-        confirmLabel="Reenviar"
-        onClose={() => setResyncOpen(false)}
-        onConfirm={() => {
-          void resync();
-          toast('Reenvio completo iniciado.', 'info');
-        }}
       />
 
       <ConfirmDialog

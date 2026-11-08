@@ -10,13 +10,17 @@ import {
 } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { Database } from 'sql.js';
-import { ApiError, api } from '../lib/api';
-import { decryptVault, deriveVaultKey, encryptVault } from '../lib/crypto';
-import { createDatabase, exportData, one, pendingCount } from '../lib/db';
+import {
+  createAccount,
+  findAccount,
+  verifyKey,
+  type LocalAccount,
+} from '../lib/accounts';
+import { decryptVault, deriveVaultKey, encryptVault, randomBase64 } from '../lib/crypto';
+import { createDatabase, exportData, importData } from '../lib/db';
 import { readVault, writeVault } from '../lib/idb';
 import { seedVault } from '../lib/seed';
-import { pullInitial, SyncEngine } from '../lib/sync';
-import type { AppUser, SyncState } from '../lib/types';
+import type { AppUser } from '../lib/types';
 import { todayISO } from '../lib/date';
 
 type Phase = 'locked' | 'loading' | 'ready';
@@ -33,16 +37,15 @@ type AppContextValue = {
   lastUsername: string;
   db: Database;
   version: number;
-  sync: SyncState;
+  savedAt: number | null;
   online: boolean;
   error: string | null;
   register: (username: string, pin: string) => Promise<void>;
   unlock: (username: string, pin: string) => Promise<void>;
   logout: () => Promise<void>;
   bump: () => void;
-  syncNow: () => Promise<void>;
-  resync: () => Promise<void>;
   downloadBackup: () => void;
+  importBackup: (file: File) => Promise<number>;
   clearError: () => void;
 };
 
@@ -78,18 +81,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AppUser | null>(null);
   const [lastUsername, setLastUsername] = useState(last?.username ?? '');
   const [version, setVersion] = useState(0);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [online, setOnline] = useState(() => navigator.onLine);
-  const [sync, setSync] = useState<SyncState>({
-    status: navigator.onLine ? 'idle' : 'offline',
-    lastSyncAt: null,
-    pending: 0,
-  });
 
   const dbRef = useRef<Database | null>(null);
   const keyRef = useRef<CryptoKey | null>(null);
   const userRef = useRef<AppUser | null>(null);
-  const syncRef = useRef<SyncEngine | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
 
@@ -103,6 +101,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const bytes = db.export();
         const encrypted = await encryptVault(key, bytes);
         await writeVault(currentUser.id, encrypted);
+        setSavedAt(Date.now());
       })
       .catch((saveError) => {
         console.error('Falha ao salvar o cofre local.', saveError);
@@ -120,31 +119,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const bump = useCallback(() => {
     setVersion((current) => current + 1);
-    const db = dbRef.current;
-    if (db) {
-      setSync((current) => ({ ...current, pending: pendingCount(db) }));
-    }
     scheduleSave();
-    syncRef.current?.schedule(1200);
   }, [scheduleSave]);
-
-  const startEngine = useCallback(
-    (db: Database, key: CryptoKey) => {
-      syncRef.current?.stop();
-      const engine = new SyncEngine({
-        db,
-        key,
-        onState: (state) => setSync(state),
-        onApplied: () => {
-          setVersion((current) => current + 1);
-          scheduleSave();
-        },
-      });
-      syncRef.current = engine;
-      engine.start();
-    },
-    [scheduleSave],
-  );
 
   const finishUnlock = useCallback(
     (db: Database, key: CryptoKey, nextUser: AppUser, salt: string) => {
@@ -156,10 +132,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       writeLastUser({ username: nextUser.username, userId: nextUser.id, salt });
       setPhase('ready');
       setError(null);
-      startEngine(db, key);
       navigate('/', { replace: true });
     },
-    [navigate, startEngine],
+    [navigate],
   );
 
   const unlock = useCallback(
@@ -168,45 +143,40 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setPhase('loading');
       setError(null);
 
-      let authUser: AppUser;
-      let salt: string;
-      let offline = false;
-
+      let account: LocalAccount | null = null;
       try {
-        const response = await api.login(normalized, pin);
-        authUser = response.user;
-        salt = response.vaultSalt;
-      } catch (authError) {
-        if (authError instanceof ApiError && authError.offline) {
-          offline = true;
-          const cached = readLastUser();
-          if (cached && cached.username.toLowerCase() === normalized.toLowerCase()) {
-            authUser = { id: cached.userId, username: cached.username };
-            salt = cached.salt;
-          } else {
-            setPhase('locked');
-            setError(
-              'Sem conexão. Entre uma vez com internet neste navegador para liberar o acesso offline.',
-            );
-            return;
-          }
-        } else {
-          setPhase('locked');
-          setError(authError instanceof Error ? authError.message : 'Não foi possível entrar.');
-          return;
-        }
+        account = await findAccount(normalized);
+      } catch {
+        setPhase('locked');
+        setError('Não foi possível ler os dados deste navegador.');
+        return;
+      }
+
+      if (!account) {
+        setPhase('locked');
+        setError(
+          'Nenhum cofre com esse nome foi encontrado neste navegador. Confira o nome ou crie um novo cofre.',
+        );
+        return;
       }
 
       let key: CryptoKey;
       try {
-        key = await deriveVaultKey(pin, salt);
+        key = await deriveVaultKey(pin, account.salt);
       } catch {
         setPhase('locked');
         setError('Não foi possível preparar o cofre. Tente novamente.');
         return;
       }
 
-      const existing = await readVault(authUser.id);
+      const valid = await verifyKey(account, key).catch(() => false);
+      if (!valid) {
+        setPhase('locked');
+        setError('PIN incorreto.');
+        return;
+      }
+
+      const existing = await readVault(account.id);
       let db: Database;
 
       if (existing) {
@@ -220,44 +190,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
         db = await createDatabase(bytes);
       } else {
-        if (offline) {
-          setPhase('locked');
-          setError('Este navegador ainda não tem uma cópia local. Conecte-se para baixar seus dados.');
-          return;
-        }
-        let created: Database | null = null;
-        try {
-          created = await createDatabase();
-          await pullInitial(created, key);
-          const total = one<{ total: number }>(
-            created,
-            'SELECT COUNT(*) AS total FROM categories',
-          );
-          if (!total || total.total === 0) seedVault(created);
-        } catch (openError) {
-          created?.close();
-          setPhase('locked');
-          setError(
-            openError instanceof ApiError
-              ? openError.message
-              : 'Não foi possível baixar seus dados. Tente novamente.',
-          );
-          return;
-        }
-        if (!created) {
-          setPhase('locked');
-          setError('Não foi possível abrir o cofre local. Tente novamente.');
-          return;
-        }
-        db = created;
-        dbRef.current = db;
-        keyRef.current = key;
-        userRef.current = authUser;
-        await enqueueSave();
+        // Conta existe, mas a cópia local sumiu (ex.: dados do navegador limpos).
+        db = await createDatabase();
+        seedVault(db);
       }
 
-      finishUnlock(db, key, authUser, salt);
-      if (existing) void enqueueSave();
+      const nextUser: AppUser = { id: account.id, username: account.username };
+      dbRef.current = db;
+      keyRef.current = key;
+      userRef.current = nextUser;
+      await enqueueSave();
+
+      finishUnlock(db, key, nextUser, account.salt);
     },
     [enqueueSave, finishUnlock],
   );
@@ -269,21 +213,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setError(null);
 
       try {
-        const response = await api.register(normalized, pin);
-        const key = await deriveVaultKey(pin, response.vaultSalt);
+        const salt = randomBase64(16);
+        const key = await deriveVaultKey(pin, salt);
+        const account = await createAccount(normalized, salt, key);
+
         const db = await createDatabase();
         seedVault(db);
+
+        const nextUser: AppUser = { id: account.id, username: account.username };
         dbRef.current = db;
         keyRef.current = key;
-        userRef.current = response.user;
+        userRef.current = nextUser;
         await enqueueSave();
-        finishUnlock(db, key, response.user, response.vaultSalt);
+
+        finishUnlock(db, key, nextUser, salt);
       } catch (registerError) {
         setPhase('locked');
         setError(
           registerError instanceof Error
             ? registerError.message
-            : 'Não foi possível criar sua conta.',
+            : 'Não foi possível criar seu cofre.',
         );
       }
     },
@@ -291,14 +240,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(async () => {
-    syncRef.current?.stop();
-    syncRef.current = null;
     if (saveTimerRef.current) {
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
     await enqueueSave();
-    void api.logout().catch(() => undefined);
 
     dbRef.current?.close();
     dbRef.current = null;
@@ -307,18 +253,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setUser(null);
     setPhase('locked');
     setVersion(0);
-    setSync({ status: navigator.onLine ? 'idle' : 'offline', lastSyncAt: null, pending: 0 });
+    setSavedAt(null);
     navigate('/', { replace: true });
   }, [enqueueSave, navigate]);
-
-  const syncNow = useCallback(async () => {
-    await syncRef.current?.syncNow();
-  }, []);
-
-  const resync = useCallback(async () => {
-    await syncRef.current?.resyncAll();
-    await enqueueSave();
-  }, [enqueueSave]);
 
   const downloadBackup = useCallback(() => {
     const db = dbRef.current;
@@ -338,15 +275,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
     URL.revokeObjectURL(url);
   }, []);
 
+  const importBackup = useCallback(
+    async (file: File) => {
+      const db = dbRef.current;
+      if (!db) throw new Error('O cofre não está aberto.');
+      const text = await file.text();
+
+      let payload: unknown;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        throw new Error('O arquivo não é um JSON válido.');
+      }
+
+      const count = importData(db, payload);
+      if (count === 0) throw new Error('Nenhum registro encontrado no arquivo.');
+
+      setVersion((current) => current + 1);
+      await enqueueSave();
+      return count;
+    },
+    [enqueueSave],
+  );
+
   useEffect(() => {
-    const handleOnline = () => {
-      setOnline(true);
-      syncRef.current?.schedule(300);
-    };
-    const handleOffline = () => {
-      setOnline(false);
-      setSync((current) => ({ ...current, status: 'offline' }));
-    };
+    const handleOnline = () => setOnline(true);
+    const handleOffline = () => setOnline(false);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     return () => {
@@ -378,16 +332,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     lastUsername,
     db: (dbRef.current ?? null) as Database,
     version,
-    sync,
+    savedAt,
     online,
     error,
     register,
     unlock,
     logout,
     bump,
-    syncNow,
-    resync,
     downloadBackup,
+    importBackup,
     clearError,
   };
 

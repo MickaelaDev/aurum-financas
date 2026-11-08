@@ -209,3 +209,31 @@ export function exportData(db: Database): Record<string, unknown> {
     data,
   };
 }
+
+/** Mescla um backup JSON exportado por `exportData` no cofre aberto. */
+export function importData(db: Database, payload: unknown): number {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Arquivo inválido.');
+  }
+
+  const data = (payload as { data?: unknown }).data;
+  if (!data || typeof data !== 'object') {
+    throw new Error('Este arquivo não parece ser um backup do Aurum.');
+  }
+
+  let imported = 0;
+  for (const entity of ENTITIES) {
+    const rows = (data as Record<string, unknown>)[entity];
+    if (!Array.isArray(rows)) continue;
+
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
+      const record = row as Record<string, unknown>;
+      if (typeof record.id !== 'string' || record.id.length === 0) continue;
+      applyRecord(db, entity, record);
+      imported += 1;
+    }
+  }
+
+  return imported;
+}

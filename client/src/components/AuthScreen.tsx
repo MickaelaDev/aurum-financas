@@ -8,7 +8,7 @@ type Mode = 'login' | 'register';
 
 export function AuthScreen() {
   const { phase, error, clearError, unlock, register, lastUsername, online } = useApp();
-  const [mode, setMode] = useState<Mode>('login');
+  const [mode, setMode] = useState<Mode>(lastUsername ? 'login' : 'register');
   const [username, setUsername] = useState(lastUsername);
   const [pin, setPin] = useState('');
   const [confirmation, setConfirmation] = useState('');
@@ -71,8 +71,8 @@ export function AuthScreen() {
         <div className="auth__notes">
           <span className="auth__rule" />
           <p>
-            Seu cofre é criptografado com o seu PIN antes de sair deste navegador.
-            Nem o servidor consegue ler seus valores.
+            Seu cofre é cifrado com o seu PIN antes de ser gravado neste navegador.
+            Nada sai daqui.
           </p>
         </div>
       </aside>
@@ -90,7 +90,7 @@ export function AuthScreen() {
           {!online ? (
             <div className="notice notice--muted">
               <WifiOff size={15} />
-              <span>Sem conexão. O acesso offline usa a cópia já salva neste navegador.</span>
+              <span>Sem conexão. O cofre fica neste navegador, então tudo continua funcionando.</span>
             </div>
           ) : null}
 
@@ -176,7 +176,7 @@ export function AuthScreen() {
           </div>
 
           <p className="auth__fineprint">
-            <LockKeyhole size={13} /> Dados salvos localmente e sincronizados de forma cifrada.
+            <LockKeyhole size={13} /> Dados salvos apenas neste navegador, cifrados com o seu PIN.
           </p>
         </div>
       </main>
