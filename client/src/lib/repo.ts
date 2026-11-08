@@ -1,6 +1,6 @@
 import type { Database } from 'sql.js';
 import { all, one, putRecord, softDelete } from './db';
-import { monthLabel } from './date';
+import { clampDayToMonth, monthLabel } from './date';
 import type {
   Account,
   AccountWithBalance,
@@ -515,13 +515,12 @@ export function payRecurring(
   if (existing) return { transaction: existing, created: false };
 
   const accountId = bill.account_id ?? defaultAccountId(db) ?? '';
-  const day = Math.min(bill.due_day, 28);
   const transaction = saveTransaction(db, {
     account_id: accountId,
     category_id: bill.category_id,
     type: 'expense',
     amount: bill.amount,
-    date: `${month}-${String(day).padStart(2, '0')}`,
+    date: clampDayToMonth(month, bill.due_day),
     description: bill.name,
     notes: 'Conta recorrente',
     recurring_id: bill.id,
@@ -609,15 +608,13 @@ export function registerSalary(
       "SELECT * FROM categories WHERE deleted = 0 AND kind = 'income' AND lower(name) LIKE '%sal%' LIMIT 1",
     )?.id ??
     null;
-  const day = Math.min(input.paymentDay, 28);
-
   return saveTransaction(db, {
     id: existing?.id,
     account_id: input.accountId,
     category_id: category,
     type: 'income',
     amount: input.net,
-    date: `${input.month}-${String(day).padStart(2, '0')}`,
+    date: clampDayToMonth(input.month, input.paymentDay),
     description: `Salário · ${monthLabel(input.month)}`,
     notes: `Bruto ${(input.gross / 100).toFixed(2)} · Descontos ${(input.deductionsTotal / 100).toFixed(2)}`,
     salary_month: input.month,
